@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Master Agent v2.2 🐰 Кролик-Сжиматор</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="bg-pattern"></div>
+    <div class="container">
+        <header class="hero">
+            <div class="rabbit-ascii" id="rabbitAscii">
+    🐰
+   /|\
+  / | \
+    |
+   / \
+            </div>
+            <h1>PDF Master Agent v2.2</h1>
+            <p class="subtitle">Кролик-Сжиматор — лучший в мире помощник по уменьшению PDF</p>
+        </header>
+
+        <main>
+            <!-- Upload Card -->
+            <section class="card" id="uploadCard">
+                <div class="upload-zone" id="dropZone">
+                    <span class="icon">📎</span>
+                    <p id="dropText">Перетащи PDF сюда или кликни для выбора</p>
+                    <input type="file" id="fileInput" accept=".pdf" hidden>
+                </div>
+                <div class="file-info" id="fileInfo">
+                    📄 <span id="fileName"></span> — <span id="fileSize"></span>
+                </div>
+
+                <div class="options-grid" id="optionsPanel">
+                    <div class="option-group">
+                        <label>⚙️ Режим сжатия</label>
+                        <select id="mode">
+                            <option value="balanced">⚖️ Balanced — лучший баланс</option>
+                            <option value="quality_first">🖼️ Quality First — качество превыше всего</option>
+                            <option value="strong">💪 Strong — агрессивное сжатие</option>
+                            <option value="extreme">🔥 Extreme — максимальное сжатие</option>
+                        </select>
+                    </div>
+                    <div class="option-group">
+                        <label>🎯 Целевой размер (МБ)</label>
+                        <input type="number" id="targetSize" value="10" min="1" max="50" step="0.5">
+                    </div>
+                </div>
+
+                <button class="btn btn-primary" id="compressBtn" style="display:none;">
+                    🗜 Сжать изо всех сил!
+                </button>
+            </section>
+
+            <!-- Progress Card -->
+            <section class="card progress-section" id="progressCard">
+                <div class="rabbit-working" id="rabbitAnim">
+   🐰
+  /|\
+ / | \
+   |
+  / \
+                </div>
+                <div class="progress-text" id="statusText">🐰 Кролик-Сжиматор проснулся...</div>
+                <div class="progress-container">
+                    <div class="progress-bar" id="progressBar"></div>
+                </div>
+                <div class="log-terminal" id="logTerminal">
+                    <div class="log-entry">> Инициализация Кролика-Сжиматора v2.2...</div>
+                </div>
+            </section>
+
+            <!-- Result Card -->
+            <section class="card result-section" id="resultCard">
+                <div class="success-badge" id="resultEmoji">🎉</div>
+                <h2 id="resultTitle">Готово, чемпион!</h2>
+                <p class="result-message" id="resultMessage"></p>
+
+                <div class="stats-grid" id="statsGrid"></div>
+
+                <div class="techniques" id="techniquesBlock">
+                    <h3>🔧 Применённые техники</h3>
+                    <ul id="techniquesList"></ul>
+                </div>
+
+                <div class="actions">
+                    <a class="btn btn-primary download-btn" id="downloadBtn" href="#" download>
+                        ⬇️ Скачать сжатый PDF
+                    </a>
+                    <button class="btn btn-secondary" id="againBtn">
+                        🔄 Сжать ещё файл
+                    </button>
+                </div>
+            </section>
+        </main>
+
+        <section class="features" id="featuresSection">
+            <div class="feature">
+                <div class="feature-icon">📉</div>
+                <h3>До 10 МБ</h3>
+                <p>Сжимаем любой PDF до целевого размера с максимальным сохранением качества</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">⚡</div>
+                <h3>4 режима</h3>
+                <p>От бережного Quality First до максимального Extreme — выбирай под задачу</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">🧠</div>
+                <h3>Умная оптимизация</h3>
+                <p>Автоматический анализ контента: сканы, текст, вектор, формы</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">🔒</div>
+                <h3>Безопасно</h3>
+                <p>Файлы удаляются через час. Никакого хранения на серверах</p>
+            </div>
+        </section>
+
+        <footer>
+            <p>🐰 PDF Master Agent v2.2 | Сделано с любовью и морковкой</p>
+            <p class="footer-links">
+                <a href="/health">Health Check</a> • 
+                <a href="#" onclick="alert('POST /compress с multipart/form-data')">API</a>
+            </p>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

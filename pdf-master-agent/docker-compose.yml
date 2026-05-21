@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  pdf-master:
+    build: .
+    container_name: rabbit-compressor
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./compressed:/app/compressed
+    environment:
+      - MAX_FILE_SIZE=524288000
+      - TARGET_SIZE_MB=10
+    restart: unless-stopped
