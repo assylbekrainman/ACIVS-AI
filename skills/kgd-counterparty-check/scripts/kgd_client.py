@@ -99,15 +99,23 @@ class KgdClient:
         return response.json()
 
 
+def _ru(value) -> str:
+    """Поле ответа может прийти как строка (реальный формат API) или как
+    объект {"ru": ..., "kk": ...} (формат из инструкции) — нормализуем."""
+    if isinstance(value, dict):
+        return value.get("ru") or ""
+    return value or ""
+
+
 def detect_flags(data: dict) -> list[str]:
     """Возвращает список сработавших красных флагов на основе ответа API."""
     flags: list[str] = []
     for field_name, description in FLAG_FIELDS.items():
-        value = (data.get(field_name) or {}).get("ru", "")
+        value = _ru(data.get(field_name))
         if value and value != "Нет данных":
             flags.append(f"{description} ({field_name}: «{value}»)")
 
-    reg_absent = (data.get("regAddressAbsent") or {}).get("ru", "")
+    reg_absent = _ru(data.get("regAddressAbsent"))
     if reg_absent == "Да":
         flags.append("отсутствует по юридическому адресу (regAddressAbsent: «Да»)")
 
@@ -119,16 +127,16 @@ def detect_flags(data: dict) -> list[str]:
 
 
 def format_summary(data: dict) -> str:
-    name = data.get("name", {}).get("ru") or "(наименование не указано в ответе)"
+    name = _ru(data.get("name")) or "(наименование не указано в ответе)"
     lines = [
         f"ИИН/БИН: {data.get('xin')}",
         f"Наименование: {name}",
         f"Дата актуальности данных: {data.get('actuality')}",
         f"Дата регистрации: {data.get('regDate')}",
-        f"Резидентство: {data.get('residency', {}).get('ru')}",
-        f"ОКЭД: {data.get('oked', {}).get('ru')} — {data.get('okedName', {}).get('ru')}",
-        f"Режим налогообложения: {data.get('taxMode', {}).get('ru')}",
-        f"Статус НДС: {data.get('vatInfo', {}).get('ru')}"
+        f"Резидентство: {_ru(data.get('residency'))}",
+        f"ОКЭД: {_ru(data.get('oked'))} — {_ru(data.get('okedName'))}",
+        f"Режим налогообложения: {_ru(data.get('taxMode'))}",
+        f"Статус НДС: {_ru(data.get('vatInfo'))}"
         + (f" (с {data.get('vatDate')})" if data.get("vatDate") else ""),
         f"Налоговая задолженность: {data.get('taxDebt', 0):,.2f} тенге".replace(",", " "),
     ]
