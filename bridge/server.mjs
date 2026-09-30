@@ -29,6 +29,18 @@ import { openRemote, proxyError, vetTarget, PROXY_UA } from './net.mjs'
 import { probeUrl, renderPage } from './page.mjs'
 import { routeCommand, ROOT as REPO_ROOT } from './skills.mjs'
 
+/**
+ * Локальные секреты из .env.local в корне репозитория (файл в .gitignore).
+ * Не перезаписывает то, что уже задано в окружении. Читаются только ключи
+ * ELEVENLABS_API_KEY и JARVIS_*, чтобы файл не мог подменить чужие переменные.
+ */
+try {
+  for (const line of readFileSync(join(REPO_ROOT, '.env.local'), 'utf8').split(/\r?\n/)) {
+    const m = /^\s*((?:JARVIS_[A-Z_]+)|ELEVENLABS_API_KEY)\s*=\s*(.*?)\s*$/.exec(line)
+    if (m && !(m[1] in process.env)) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '')
+  }
+} catch {}
+
 const PORT = Number(process.env.JARVIS_BRIDGE_PORT ?? 8787)
 
 /**
