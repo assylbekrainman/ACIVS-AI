@@ -1,6 +1,6 @@
 ---
-name: gp-mailing
-description: "Актуальный список адресатов ДКТ-3 (25 адресов, с учётом проектов 2026 года, asylbexul@gmail.com исключён подтверждённо)"
+name: "gp-mailing"
+description: "Актуальный список адресатов ДКТ-3 (26 адресов, с учётом проектов 2026 года, asylbexul@gmail.com исключён подтверждённо)"
 ---
 
 # Рассылка грантополучателям ДКТ-3
@@ -21,7 +21,7 @@ description: "Актуальный список адресатов ДКТ-3 (25 
 Обращение к адресатам по умолчанию — «Уважаемые грантополучатели!» (не «коллеги»), если пользователь не просит иначе.
 
 ### Шаг 2 — Определи список адресатов
-Используй базовый список из `references/recipients.md` (см. актуальную версию ниже — обновлён 31.08.2026).
+Используй базовый список из `references/recipients.md` (см. актуальную версию ниже — обновлён 29.09.2026).
 
 Если пользователь говорит «не всем» или называет исключения — убери нужные адреса.
 Если пользователь добавляет нового получателя — добавь в список.
@@ -40,10 +40,11 @@ description: "Актуальный список адресатов ДКТ-3 (25 
 
 ---
 
-## Актуальный список адресатов (25 адресов, обновлено 31.08.2026)
+## Актуальный список адресатов (26 адресов, обновлено 29.09.2026)
 
 ```
 Dima-shum-92@mail.ru
+asylan.kopish@mail.ru
 tsenter-zerna@mail.ru
 buh8282@mail.ru
 vika_rose83@mail.ru
@@ -73,6 +74,9 @@ nazerke_oraz@mail.ru
 ### Новые контакты по проектам 2026 года (добавлены 31.08.2026)
 P.oleg76@mail.ru, a.temirkhan@kbtu.kz, y.iskakov@satbayev.university, serdaliyev.yerdulla@gmail.com, tokmajeshvili@gmail.com, saduakassov@mail.ru, smanovruslan@mail.ru, babkenov64@mail.ru, nazerke_oraz@mail.ru
 
+### Добавлено 29.09.2026
+asylan.kopish@mail.ru — контакт по проекту МТИИ им. Ш.Муртазы (DP21681508)
+
 ### Исключены как неактуальные (подтверждено пользователем 31.08.2026)
 Bakyt_kusy_kz@mail.com, yelzhas_90@mail.ru, gulmirakz_80@mail.ru, Tlevlessova@gmail.com, tooalala@gmail.com, asylbexul@gmail.com
 
@@ -86,7 +90,7 @@ Bakyt_kusy_kz@mail.com, yelzhas_90@mail.ru, gulmirakz_80@mail.ru, Tlevlessova@gm
 | DP23692342 | Овощные соки | alimhanov.meirzhan@gmail.com, a.daurenbekova@satbayev.university |
 | DP21681972 | Переработка фруктового сырья | spk_tjj_tolesh@mail.ru |
 | DP21681724 | Пчелопитомник | vika_rose83@mail.ru |
-| DP21681508 | Совместная технология | Dima-shum-92@mail.ru |
+| DP21681508 | Совместная технология (МТИИ) | Dima-shum-92@mail.ru, asylan.kopish@mail.ru |
 | DP23691813 | — | salima.abdraimova@kaznu.edu.kz |
 | DP23691582 | — | адрес asylbexul@gmail.com исключён из рассылки (неактуален) |
 
@@ -107,3 +111,4 @@ Bakyt_kusy_kz@mail.com, yelzhas_90@mail.ru, gulmirakz_80@mail.ru, Tlevlessova@gm
 - Обращение по умолчанию — «Уважаемые грантополучатели!»
 - Не добавляй лишних вводных фраз — создавай черновик сразу после получения текста
 - Если нужно убрать получателей, которые уже ответили — уточни у пользователя список ответивших
+- Проекты 2022 и 2023 годов включай в рассылку по Приложению 4 только если они продлены на 2026 год; проекты, закрывшие объёмы продаж, из такой рассылки исключай
