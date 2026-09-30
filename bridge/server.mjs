@@ -360,6 +360,19 @@ function elevenKey() {
 const VOICE_ID = process.env.JARVIS_VOICE_ID ?? 'JBFqnCBsd6RMkjVDRZzb'
 
 /**
+ * Модели озвучки по языку.
+ *
+ * Flash v2.5 быстрая и говорит по-русски, но казахского в ней нет. Для
+ * казахской речи берём eleven_v3 (70+ языков, медленнее). Определяем по
+ * буквам, которых нет в русском: ә і ң ғ ү ұ қ ө һ.
+ * Переопределить: JARVIS_TTS_MODEL (для русского), JARVIS_TTS_MODEL_KK (для казахского).
+ */
+const TTS_MODEL_RU = process.env.JARVIS_TTS_MODEL ?? 'eleven_flash_v2_5'
+const TTS_MODEL_KK = process.env.JARVIS_TTS_MODEL_KK ?? 'eleven_v3'
+const KAZAKH = /[әіңғүұқөһӘІҢҒҮҰҚӨҺ]/
+const ttsModelFor = (text) => (KAZAKH.test(text) ? TTS_MODEL_KK : TTS_MODEL_RU)
+
+/**
  * Where /file is permitted to read from, and how big a read may get.
  *
  * The roots are realpath'd once at boot so the containment check below compares
@@ -755,11 +768,11 @@ const handleRequest = async (req, res) => {
             text,
             // Flash is the low-latency model — a conversation needs speed more
             // than it needs the last few percent of quality.
-            model_id: 'eleven_flash_v2_5',
+            model_id: ttsModelFor(text),
             voice_settings: {
-              stability: 0.4,
-              similarity_boost: 0.75,
-              speed: 1.05,
+              stability: Number(process.env.JARVIS_VOICE_STABILITY ?? 0.5),
+              similarity_boost: Number(process.env.JARVIS_VOICE_SIMILARITY ?? 0.75),
+              speed: Number(process.env.JARVIS_VOICE_SPEED ?? 1.0),
             },
           }),
         },
