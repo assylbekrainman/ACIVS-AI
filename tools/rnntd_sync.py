@@ -1,190 +1,175 @@
 #!/usr/bin/env python3
-"""Сведение файла «Показатели проектов на ДД.ММ.ГГГГ.xlsx» (Google Drive) и реестра РННТД в CSV для дашборда.
+"""Сведение квартальных файлов «Показатели проектов на ДД.ММ.ГГГГ» (Google Drive) в CSV для дашборда РННТД.
+Источник — только Google Drive. Лист «Свод» не используется: итоги считаются по проектам.
 
-    python3 tools/rnntd_sync.py <показатели.xlsx> tools/rnntd_registry.csv <папка_вывода>
+    python3 tools/rnntd_sync.py <папка_со_снимками> <проекты_2022-2026.xlsx> <папка_вывода>
 
+В папке со снимками лежат файлы с именами ГГГГ-ММ-ДД.xlsx (по одному на отчётную дату).
 Результат:
-  projects.csv   — все проекты (объединение реестра и листов показателей), показатели на последнюю доступную дату,
-                   признаки полноты данных (src, asof, miss, quality)
-  history.csv    — накопленные продажи проекта по датам (irn, date, sales)
-  quarterly.csv  — лист «Свод» (портфель по кварталам)
-  quality.json   — охват, расхождения и предупреждения
-Колонки последнего квартала определяются по заголовкам, поэтому скрипт работает и в следующих кварталах.
+  projects.csv   — все проекты, показатели из последнего снимка, где проект есть; признаки полноты и отчётности
+  history.csv    — показатели проекта на каждую отчётную дату
+  quarterly.csv  — итоги портфеля по датам (сумма по проектам)
+  quality.csv    — замечания по качеству данных
+Колонки находятся по заголовкам, поэтому новые кварталы работают без правок.
 """
-import sys, re, csv, json, datetime
+import sys, os, re, csv, json, datetime, glob
 import openpyxl
 
 IRN_RE = re.compile(r'^(?:\d{3,4}-\d{2}-ГК|[A-ZА-Я]{2}\d{6,})$')
 DATE_RE = re.compile(r'(\d{2})\.(\d{2})\.(\d{4})')
-LAT = str.maketrans('АРВСЕКМНОТХ', 'APBCEKMHOTX')   # кириллица -> латиница в ИРН
-
-# поле -> регулярное выражение заголовка; берётся ПОСЛЕДНЯЯ подходящая колонка листа
-FIELDS = {
-    'sales':  r'^Общие продажи всего|^Продажи, тенге$',
-    'cofin':  r'^Общее фактическое софинансирование|^Фактическое софинансирование, тенге$',
-    'export': r'^Общий фактический экспорт|^Фактический экспорт, тенге$',
-    'author_fee': r'^Общее авторское вознаграждение|^Фактическое авторское вознаграждение',
-    'jobs':   r'^Количество созданных рабочих мест',
-    'taxes':  r'^Налоги суммарно',
-    'licenses': r'^Общее количество заключенных лицензионных|^Количество заключенных лицензионных соглашений, ед',
-    'salary': r'Общая сумма зар\. ?платы, выплаченной команде',
-    'salary_sci': r'^(Общая сумма зар\.платы ученым|Сумма зар\.платы ученым)',
-    'assets': r'^Общая по закупу основных средств',
-    'ntr':    r'^НТР$',
-}
-ESSENTIAL = {'industry': 'отрасль', 'region': 'регион', 'status': 'статус', 'contract_no': 'договор', 'grant': 'сумма гранта', 'sales': 'продажи'}
+LAT = str.maketrans('АРВСЕКМНОТХ', 'APBCEKMHOTX')
+FIELDS = {   # поле -> заголовок; берётся последняя подходящая колонка листа
+    'sales': r'^Общие продажи всего|^Продажи, тенге$', 'cofin': r'^Общее фактическое софинансирование|^Фактическое софинансирование, тенге$',
+    'export': r'^Общий фактический экспорт|^Фактический экспорт, тенге$', 'author_fee': r'^Общее авторское вознаграждение|^Фактическое авторское вознаграждение',
+    'jobs': r'^Количество созданных рабочих мест', 'taxes': r'^Налоги суммарно', 'licenses': r'^Общее количество заключенных лицензионных|^Количество заключенных лицензионных соглашений, ед',
+    'salary': r'Общая сумма зар\. ?платы, выплаченной команде', 'assets': r'^Общая по закупу основных средств', 'ntr': r'^НТР$'}
+METRICS = ['sales', 'cofin', 'export', 'taxes', 'jobs', 'assets', 'ntr']
+ESSENTIAL = {'industry': 'отрасль', 'region': 'регион', 'grant': 'сумма гранта', 'sales': 'продажи'}
 
 def norm(v): return re.sub(r'\s+', ' ', str(v)).strip() if v is not None else ''
-def key(irn): return irn.translate(LAT)
-def num(v):
+def key(i): return i.translate(LAT)
+def num(v, errs=None):
     if v is None or v == '': return ''
     if isinstance(v, (int, float)): return round(v)
     s = str(v).replace(' ', '').replace('\xa0', '').replace(',', '')
     try: return round(float(s))
-    except ValueError: return ''
-def parse_date(t):
-    m = DATE_RE.search(t or '')
-    return datetime.date(int(m[3]), int(m[2]), int(m[1])).isoformat() if m else ''
+    except ValueError:
+        if errs is not None and s.startswith('#'): errs.append(s)
+        return ''
+def pdate(t):
+    m = DATE_RE.search(t or ''); return datetime.date(int(m[3]), int(m[2]), int(m[1])).isoformat() if m else ''
+def dmy(d): return f'{d[8:]}.{d[5:7]}.{d[:4]}'
 
-def read_drive(wb, warnings):
-    out, hist = {}, []
+def read_snapshot(path, errs):
+    wb = openpyxl.load_workbook(path, data_only=True); out = {}; sheets = {}; dup = []
     for ws in wb:
         if ws.title == 'Свод': continue
         rows = list(ws.iter_rows(values_only=True))
         hi = next((i for i, r in enumerate(rows) if r and r[0] and '№' in str(r[0])), None)
-        if hi is None: warnings.append(f'Лист {ws.title}: не найден заголовок'); continue
+        if hi is None: continue
         head = [norm(c) for c in rows[hi]]
-        col = {}
-        for k, rx in FIELDS.items():
-            idx = [i for i, h in enumerate(head) if re.search(rx, h)]
-            if idx: col[k] = idx[-1]
-            else: warnings.append(f'Лист {ws.title}: нет колонки «{k}»')
-        pcol = lambda rx: next((i for i, h in enumerate(head) if re.search(rx, h)), None)
-        c_name, c_grantee, c_grant, c_paid = pcol(r'^Название проекта'), pcol(r'^Грантополучатель'), pcol(r'^Сумма гранта'), pcol(r'^Фактически перечислено')
-        asof = parse_date(head[col['sales']]) if 'sales' in col else ''
-        asof = asof or parse_date(norm(rows[0][0]))
-        ytd = [(i, parse_date(h)) for i, h in enumerate(head) if re.match(r'^Продажи на \d{2}\.\d{2}\.\d{4}', h)]
+        col = {k: [i for i, h in enumerate(head) if re.search(rx, h)][-1] for k, rx in FIELDS.items() if any(re.search(rx, h) for h in head)}
+        p = lambda rx: next((i for i, h in enumerate(head) if re.search(rx, h)), None)
+        cn, cg, cgr, cp, cd = p(r'^Название проекта'), p(r'^Грантополучатель'), p(r'^Сумма гранта'), p(r'^Фактически перечислено'), p(r'^Проектная дирекция')
+        g = lambda r, i: r[i] if i is not None and i < len(r) else None
+        asof = pdate(head[col['sales']]) if 'sales' in col else ''
+        sheets[ws.title] = asof or pdate(norm(rows[0][0]))
         for r in rows[hi + 1:]:
             irn = norm(r[1])
             if not IRN_RE.match(irn): continue
-            rec = {'asof': asof, 'sheet': ws.title, 'irn': irn,
-                   'd_name': norm(r[c_name]) if c_name is not None else '', 'd_grantee': norm(r[c_grantee]) if c_grantee is not None else '',
-                   'd_grant': num(r[c_grant]) if c_grant is not None else '', 'd_paid': num(r[c_paid]) if c_paid is not None else ''}
-            for k, i in col.items(): rec[k] = num(r[i])
+            rec = {'irn': irn, 'sheet': ws.title, 'name': norm(g(r, cn)), 'grantee': norm(g(r, cg)), 'grant': num(g(r, cgr), errs), 'paid': num(g(r, cp), errs), 'direction': norm(g(r, cd))}
+            for k, i in col.items(): rec[k] = num(g(r, i), errs)
+            if key(irn) in out: dup.append(irn)
             out[key(irn)] = rec
-            if len(ytd) >= 2:   # колонки «на 31.12.ГГГГ» (база) и накопленные итоги с начала года
-                base = num(r[ytd[0][0]]) or 0
-                hist.append((irn, ytd[0][1], base))
-                for i, d in ytd[1:]:
-                    v = num(r[i])
-                    if v != '' and d: hist.append((irn, d, base + v))
-    return out, hist
+    return out, sheets, dup
 
-def read_quarterly(wb, warnings):
-    ws = wb['Свод']; rows = list(ws.iter_rows(values_only=True)); head = [norm(c) for c in rows[0]]
-    keys = {'Продажи': 'sales', 'Налоги': 'taxes', 'Роялти': 'royalty', 'Софинансирование': 'cofin', 'рабочих мест': 'jobs',
-            'лицензионных': 'licenses', 'Экспорт': 'export', 'зар.плата': 'salary', 'Основные средства': 'assets', 'Вклад в Р': 'ntr'}
-    cols = {}
-    for i, h in enumerate(head):
-        for frag, k in keys.items():
-            if frag in h and k not in cols.values(): cols[i] = k
-    out = []
-    for r in rows[1:]:
-        d = parse_date(norm(r[0]))
-        if not d or 'прирост' in norm(r[0]): continue
-        rec = {'date': d}
-        for i, k in cols.items():
-            v = num(r[i]); rec[k] = v
-            if v == '' and r[i] not in (None, ''): warnings.append(f'Лист «Свод» {d}: «{k}» — ошибка формулы ({r[i]}), значение пропущено')
-        out.append(rec)
-    return sorted(out, key=lambda x: x['date'])
+def region_of(oblast, city):
+    M = {'тараз': 'Жамбылская область', 'караганда': 'Карагандинская область', 'туркестан': 'Туркестанская область', 'усть-каменогорск': 'Восточно-Казахстанская область', 'степногорск': 'Акмолинская область', 'кокшетау': 'Акмолинская область', 'костанай': 'Костанайская область', 'павлодар': 'Павлодарская область', 'актобе': 'Актюбинская область', 'атырау': 'Атырауская область', 'актау': 'Мангистауская область', 'семей': 'Абайская область', 'петропавловск': 'Северо-Казахстанская область', 'уральск': 'Западно-Казахстанская область', 'кызылорда': 'Кызылординская область', 'талдыкорган': 'Жетысуская область', 'конаев': 'Алматинская область'}
+    def clean(s):
+        s = norm(s).strip(' ,;')
+        return '' if s.lower() in ('', '-', 'none', 'нет', '0', '0.0') else s
+    for s in (clean(oblast), clean(city)):
+        if not s: continue
+        l = s.lower().replace('г.', '').replace('город', '').replace('гор.', '').strip()
+        for c in ('алматы', 'астана', 'шымкент'):
+            if l == c or (c in l and 'област' not in l and 'обл' not in l): return c.capitalize()
+        for c, rg in M.items():
+            if c in l and 'обл' not in l: return rg
+        m = re.match(r'^([а-яё\- ]+?)\s*(област|обл\.?)', l)
+        if m:
+            b = m.group(1).strip().capitalize()
+            return {'Вко': 'Восточно-Казахстанская область', 'Ско': 'Северо-Казахстанская область', 'Зко': 'Западно-Казахстанская область'}.get(b, b + ' область')
+        if l in ('вко',): return 'Восточно-Казахстанская область'
+        if l in ('ско',): return 'Северо-Казахстанская область'
+        if l in ('зко',): return 'Западно-Казахстанская область'
+        if oblast == s: continue
+        return s.capitalize()
+    return ''
 
-def main(src, registry_csv, outdir):
-    warnings = []
-    wb = openpyxl.load_workbook(src, data_only=True)
-    drive, hist = read_drive(wb, warnings)
-    quarterly = read_quarterly(wb, warnings)
-    reg, dups = {}, {}
-    for r in csv.DictReader(open(registry_csv, encoding='utf-8')):
-        k = key(r['irn'])
-        if k in reg: dups.setdefault(k, [reg[k]['status']]).append(r['status'])
-        reg[k] = r   # при дубле остаётся последняя строка реестра
-    METRICS = ['sales', 'cofin', 'export', 'taxes', 'jobs', 'assets', 'ntr']
-    projects = []
-    for k in sorted(set(reg) | set(drive)):
-        r, d = reg.get(k, {}), drive.get(k)
-        rec = {f: r.get(f, '') for f in ['irn', 'year', 'source', 'name', 'applicant', 'grantee', 'model', 'mechanism', 'period', 'months', 'contract_no',
-               'contract_date', 'grant', 'grant_s1', 'grant_s2', 'grant_s3', 'grant_s4', 'cofin_plan', 'product_service', 'product_goods', 'region',
-               'industry', 'status', 'closure_reason', 'nns_decision', 'direction', 'paid', 'ip_total']}
-        rec['irn'] = rec['irn'] or d['irn']
-        rec['name'] = rec['name'] or (d or {}).get('d_name', ''); rec['grantee'] = rec['grantee'] or (d or {}).get('d_grantee', '')
-        rec['grant'] = rec['grant'] if rec['grant'] != '' else (d or {}).get('d_grant', '')
-        rec['year'] = rec['year'] or (d or {}).get('sheet', '')
-        # показатели: берём источник с более поздней датой; при равенстве — файл Drive
-        rasof = '2026-03-31' if any(r.get('r_' + m, '') != '' for m in METRICS) else ''
-        use_drive = d is not None and any(d.get(m, '') != '' for m in METRICS) and (not rasof or d['asof'] >= rasof)
-        if use_drive:
-            rec['src'], rec['asof'] = 'drive', d['asof']
-            for m in METRICS + ['author_fee', 'licenses', 'salary', 'salary_sci']: rec[m] = d.get(m, '')
-            if rec['paid'] == '': rec['paid'] = d.get('d_paid', '')
-        elif rasof:
-            rec['src'], rec['asof'] = 'registry', rasof
-            for m in METRICS: rec[m] = r.get('r_' + m, '')
-        else:
-            rec['src'], rec['asof'] = 'none', ''
-        for m in METRICS + ['author_fee', 'licenses', 'salary', 'salary_sci']: rec.setdefault(m, '')
-        miss = [lab for f, lab in ESSENTIAL.items() if rec.get(f, '') in ('', None)]
-        rec['miss'] = '; '.join(miss)
-        rec['quality'] = 'Нет показателей' if rec['src'] == 'none' else ('Полные' if not miss else 'Частичные')
-        if d and not r: rec['in_registry'] = 'нет'
-        rec['in_registry'] = 'да' if r else 'нет'; rec['in_drive'] = 'да' if d else 'нет'
+def industry_of(t):
+    l = norm(t).lower()
+    for k, v in [('агропромышл', 'АПК'), ('обрабатывающ', 'Обрабатывающая промышленность'), ('цифров', 'Цифровизация'), ('экологи', 'Экология'), ('здравоохран', 'Здравоохранение'), ('геолог', 'Геология и недропользование'), ('машиностро', 'Машиностроение'), ('хими', 'Химическая промышленность'), ('образован', 'Качественное образование'), ('энергет', 'Энергетика'), ('металлург', 'Металлургия'), ('безопасност', 'Национальная безопасность')]:
+        if k in l: return v
+    return ''
+
+def model_of(t):
+    l = norm(t).lower()
+    if l in ('', 'none', '0.0', '3.0', '0', '-'): return ''
+    if 'вуз' in l: return 'ВУЗ'
+    if l in ('нпц',): return 'НПЦ'
+    if 'нии' in l: return 'НИИ'
+    if 'физ' in l: return 'Физическое лицо'
+    return 'Бизнес-организация' if any(x in l for x in ('тоо', 'ао', 'нао', 'бизнес', 'нпп', 'ип', 'стартап')) else t
+
+def read_attrs(path):
+    ws = openpyxl.load_workbook(path, data_only=True).active; out = {}
+    for r in list(ws.iter_rows(values_only=True))[1:]:
+        irn = norm(r[1])
+        if not IRN_RE.match(irn): continue
+        out[key(irn)] = {'industry': industry_of(r[10]), 'region': region_of(r[4], r[5]), 'model': model_of(r[6]), 'period': norm(r[8]), 'applicant': norm(r[3])}
+    return out
+
+def main(snapdir, attrs_xlsx, outdir):
+    files = sorted(glob.glob(f'{snapdir}/????-??-??.xlsx')); dates = [os.path.basename(f)[:10] for f in files]
+    snaps, sheets, dups, errs = {}, {}, {}, {}
+    for f, d in zip(files, dates):
+        e = []; snaps[d], sheets[d], dups[d] = read_snapshot(f, e); errs[d] = e
+    latest = dates[-1]; attrs = read_attrs(attrs_xlsx)
+    keys = sorted({k for d in dates for k in snaps[d]} | set())
+    projects, hist, F = [], [], []
+    for k in keys:
+        last = next(d for d in reversed(dates) if k in snaps[d]); s = snaps[last][k]; a = attrs.get(k, {})
+        rec = {'irn': s['irn'], 'year': s['sheet'], 'name': s['name'], 'grantee': s['grantee'], 'direction': s['direction'], 'industry': a.get('industry', ''), 'region': a.get('region', ''), 'model': a.get('model', ''),
+               'period': a.get('period', ''), 'status': 'В отчётности' if last == latest else 'Вне отчётности', 'last_date': last, 'in_attrs': 'да' if a else 'нет', 'n_snap': sum(1 for d in dates if k in snaps[d])}
+        for f_ in ['grant', 'paid'] + METRICS + ['author_fee', 'licenses', 'salary']: rec[f_] = s.get(f_, '')
+        if not rec['name'] and a.get('applicant'): rec['grantee'] = rec['grantee'] or a['applicant']
+        miss = [lab for f_, lab in ESSENTIAL.items() if rec[f_] in ('', None)]
+        rec['miss'] = '; '.join(miss); rec['quality'] = 'Нет показателей' if all(rec[m] == '' for m in METRICS) else ('Полные' if not miss else 'Частичные')
         projects.append(rec)
-    pf = ['irn', 'year', 'name', 'grantee', 'applicant', 'source', 'model', 'mechanism', 'direction', 'industry', 'region', 'status', 'closure_reason', 'nns_decision',
-          'contract_no', 'contract_date', 'period', 'months', 'grant', 'grant_s1', 'grant_s2', 'grant_s3', 'grant_s4', 'cofin_plan', 'paid',
-          'src', 'asof', 'sales', 'cofin', 'export', 'taxes', 'jobs', 'assets', 'ntr', 'author_fee', 'licenses', 'salary', 'salary_sci', 'ip_total',
-          'product_service', 'product_goods', 'in_registry', 'in_drive', 'miss', 'quality']
-    def w(path, fields, rows):
-        with open(path, 'w', newline='', encoding='utf-8') as f:
-            wr = csv.DictWriter(f, fields, extrasaction='ignore'); wr.writeheader(); wr.writerows(rows)
-    w(f'{outdir}/projects.csv', pf, projects)
-    w(f'{outdir}/history.csv', ['irn', 'date', 'sales'], [{'irn': i, 'date': d, 'sales': s} for i, d, s in hist])
-    w(f'{outdir}/quarterly.csv', ['date', 'sales', 'taxes', 'royalty', 'cofin', 'jobs', 'licenses', 'export', 'salary', 'assets', 'ntr'], quarterly)
-    from collections import Counter
-    qc = Counter(p['quality'] for p in projects); sc = Counter(p['src'] for p in projects)
-    meta = {'projects': len(projects), 'registry': len(reg), 'drive': len(drive), 'both': len(set(reg) & set(drive)),
-            'only_registry': len(set(reg) - set(drive)), 'only_drive': len(set(drive) - set(reg)), 'quality': dict(qc), 'source': dict(sc),
-            'latest_quarter': quarterly[-1]['date'] if quarterly else '', 'warnings': sorted(set(warnings))}
-    # --- замечания по качеству данных (показываются на дашборде) ---
-    F = []
+        for d in dates:
+            if k in snaps[d]:
+                h = {'irn': s['irn'], 'date': d}; h.update({m: snaps[d][k].get(m, '') for m in METRICS}); hist.append(h)
+    quarterly = []
+    for d in dates:
+        q = {'date': d, 'n_projects': len(snaps[d])}
+        for m in METRICS: q[m] = sum(v.get(m, 0) or 0 for v in snaps[d].values() if v.get(m, '') != '')
+        quarterly.append(q)
+    # --- замечания ---
     def add(sev, finding, count, rec): F.append({'severity': sev, 'finding': finding, 'count': count, 'recommendation': rec})
-    err = [x for x in warnings if 'ошибка формулы' in x]
-    if err: add('Высокая', 'Лист «Свод»: ошибка формулы (#VALUE!) в итогах последнего квартала — ' + '; '.join(sorted({{'sales': 'продажи', 'ntr': 'вклад в НТР'}.get(re.findall('«(\\w+)»', x)[-1], re.findall('«(\\w+)»', x)[-1]) for x in err})), len(err), 'Исправить формулы в листе «Свод»; до исправления значения на дашборде пропущены.')
-    if dups: add('Высокая', 'Дубли ИРН в реестре с разными статусами: ' + ', '.join(f"{k} ({' / '.join(v)})" for k, v in dups.items()), len(dups), 'Оставить одну запись на ИРН; смена грантополучателя оформлять отдельным полем, а не новой строкой.')
-    stale = {}
-    for p in projects:
-        if p['src'] == 'drive' and p['asof'] and p['asof'] < meta['latest_quarter']: stale[p['asof']] = stale.get(p['asof'], 0) + 1
-    old_sheets = sorted({(w['sheet'], w['asof']) for w in drive.values() if w['asof'] and w['asof'] < meta['latest_quarter']})
-    if old_sheets:
-        n_old = sum(1 for w in drive.values() if w['asof'] < meta['latest_quarter'])
-        add('Средняя', 'Листы с устаревшей отчётной датой: ' + ', '.join(f"{s} — на {a[8:]}.{a[5:7]}.{a[:4]}" for s, a in old_sheets), n_old, 'Обновить листы до последнего квартала; пока показатели этих проектов берутся из реестра (31.03.2026), если он свежее.')
-    only_r = [p for p in projects if p['in_drive'] == 'нет']
-    if only_r: add('Средняя', 'Проекты из реестра отсутствуют в листах показателей Drive (закрытые, завершённые или не внесённые)', len(only_r), 'Подтвердить статус; для завершённых и закрытых зафиксировать итоговые показатели на дату закрытия.')
-    only_d = [p for p in projects if p['in_registry'] == 'нет']
-    if only_d: add('Средняя', 'Проекты из листов Drive отсутствуют в реестре — нет отрасли, региона, статуса, условий договора', len(only_d), 'Внести проекты в реестр; пока на дашборде они отображаются как «Не указано».')
-    for f_, lab in [('industry', 'отрасль'), ('region', 'регион'), ('contract_no', 'номер договора'), ('grant', 'сумма гранта')]:
+    old = {sh: dt for sh, dt in sheets[latest].items() if dt and dt < latest}
+    if old: add('Средняя', 'Листы последнего файла с устаревшей отчётной датой: ' + ', '.join(f'{s} — на {dmy(dt)}' for s, dt in sorted(old.items())), sum(1 for v in snaps[latest].values() if v['sheet'] in old), 'Обновить листы до отчётной даты файла.')
+    drop = [p for p in projects if p['status'] == 'Вне отчётности']
+    if drop: add('Средняя', f'Проекты были в прежних файлах, но отсутствуют в последнем ({dmy(latest)}); их показатели взяты на последнюю дату наличия', len(drop), 'Подтвердить причину (завершение, закрытие, пропуск) и зафиксировать итоговые показатели.')
+    for d, e in errs.items():
+        if e and d == latest: add('Высокая', f'В файле на {dmy(d)} есть ячейки с ошибками формул: {", ".join(sorted(set(e)))}', len(e), 'Исправить формулы; такие ячейки на дашборде считаются пустыми.')
+    dd = [i for i in dups[latest]]
+    if dd: add('Высокая', 'ИРН встречается на нескольких листах последнего файла: ' + ', '.join(dd[:6]), len(dd), 'Оставить одну запись на проект.')
+    # уменьшение накопленных продаж между снимками
+    dec = []
+    for k in keys:
+        prev = None
+        for d in dates:
+            if k in snaps[d]:
+                v = snaps[d][k].get('sales', '')
+                if v != '' and prev not in (None, '') and v < prev - 1: dec.append((k, prev - v))
+                prev = v if v != '' else prev
+    decn = len({k for k, _ in dec})
+    if decn: add('Средняя', f'Накопленные продажи уменьшились между отчётными датами (сумма снижений {sum(x for _, x in dec)/1e6:,.0f} млн ₸)'.replace(',', ' '), decn, 'Проверить корректировки; накопленные продажи не должны убывать.')
+    no_attr = [p for p in projects if p['in_attrs'] == 'нет']
+    if no_attr: add('Средняя', 'Для проектов нет описательных данных (отрасль, регион, тип организации): файл с атрибутами на Drive охватывает только конкурсы 2022–2026', len(no_attr), 'Разместить на Drive реестр проектов 2016–2021 или добавить атрибуты в файлы показателей.')
+    for f_, lab in [('industry', 'отрасль'), ('region', 'регион'), ('model', 'тип организации'), ('grant', 'сумма гранта')]:
         n = sum(1 for p in projects if p[f_] in ('', None))
-        if n: add('Низкая', f'Не заполнено поле «{lab}»', n, 'Дозаполнить в реестре.')
-    for m_, lab in [('taxes', 'налоги'), ('cofin', 'софинансирование'), ('export', 'экспорт'), ('jobs', 'рабочие места'), ('assets', 'основные средства')]:
-        tot = sum(w[m_] for w in drive.values() if w.get(m_, '') != ''); sv = quarterly[-1].get(m_, '')
-        if sv != '' and sv and abs(tot - sv) / sv > 0.03:
-            add('Средняя', f'Расхождение «Свод» и суммы по листам проектов — {lab}: {sv:,} против {tot:,}'.replace(',', ' '), '', 'Сверить методику свода (какие проекты и периоды входят в итог).')
+        if n: add('Низкая', f'Не заполнено поле «{lab}»', n, 'Дозаполнить.')
+    nn = sum(1 for p in projects if p['quality'] == 'Нет показателей')
+    if nn: add('Средняя', 'Нет ни одного финансового показателя', nn, 'Запросить отчётность у проектных менеджеров.')
+    def w(path, fields, rows):
+        with open(path, 'w', newline='', encoding='utf-8') as fh:
+            wr = csv.DictWriter(fh, fields, extrasaction='ignore'); wr.writeheader(); wr.writerows(rows)
+    w(f'{outdir}/projects.csv', ['irn', 'year', 'name', 'grantee', 'direction', 'industry', 'region', 'model', 'period', 'status', 'last_date', 'in_attrs', 'n_snap', 'grant', 'paid'] + METRICS + ['author_fee', 'licenses', 'salary', 'miss', 'quality'], projects)
+    w(f'{outdir}/history.csv', ['irn', 'date'] + METRICS, hist)
+    w(f'{outdir}/quarterly.csv', ['date', 'n_projects'] + METRICS, quarterly)
     w(f'{outdir}/quality.csv', ['severity', 'finding', 'count', 'recommendation'], F)
-    RECON = []
-    for m_, lab in [('sales', 'Продажи'), ('taxes', 'Налоги'), ('cofin', 'Софинансирование'), ('export', 'Экспорт'), ('jobs', 'Рабочие места'), ('assets', 'Основные средства'), ('ntr', 'Вклад в НТР')]:
-        vals = [w[m_] for w in drive.values() if w.get(m_, '') != '']
-        RECON.append({'metric': m_, 'label': lab, 'svod': quarterly[-1].get(m_, ''), 'drive_sum': sum(vals) if vals else ''})
-    w(f'{outdir}/recon.csv', ['metric', 'label', 'svod', 'drive_sum'], RECON)
-    json.dump(meta, open(f'{outdir}/quality.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
-    print(json.dumps(meta, ensure_ascii=False, indent=1))
+    from collections import Counter
+    print(json.dumps({'snapshots': dates, 'projects': len(projects), 'quality': Counter(p['quality'] for p in projects), 'status': Counter(p['status'] for p in projects), 'findings': len(F)}, ensure_ascii=False, default=dict))
 
 if __name__ == '__main__': main(*sys.argv[1:4])

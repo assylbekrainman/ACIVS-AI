@@ -1,9 +1,10 @@
 # Обновление дашборда РННТД раз в квартал
 
-1. Скачать файл «Показатели проектов на ДД.ММ.ГГГГ.xlsx» с Google Drive (коннектор Google Drive: `download_file_content`, base64 → .xlsx).
-2. Реестр атрибутов проектов (`tools/rnntd_registry.csv`) при необходимости пересобрать:
-   `python3 tools/rnntd_registry.py <реестр.xlsx> tools/rnntd_registry.csv`
-3. `python3 tools/rnntd_sync.py <показатели.xlsx> tools/rnntd_registry.csv <папка>` → `projects.csv` (все проекты, объединение реестра и Drive),
-   `history.csv`, `quarterly.csv`, `quality.csv`, `recon.csv`, `quality.json`.
-4. Загрузить CSV в дашборд и обновить `url` и `updated` у источников `projects`, `history`, `quarterly`, `quality`, `recon`.
-5. Справки: `python3 tools/rnntd_spravka.py <папка с CSV> spravki --variant all --format all [--year 2024]`.
+Источник — только Google Drive.
+
+1. Скачать с Drive файл «Показатели проектов на ДД.ММ.ГГГГ» за новую отчётную дату (Google Drive, `download_file_content`; для Google Таблиц — экспорт в xlsx) и положить в папку со снимками под именем `ГГГГ-ММ-ДД.xlsx` рядом с предыдущими.
+2. Скачать с Drive файл «Проекты 2022-2026 г. данные.xlsx» (описательные поля: отрасль, регион, тип организации).
+3. `python3 tools/rnntd_sync.py <папка_со_снимками> <проекты_2022-2026.xlsx> <папка_вывода>` → `projects.csv`, `history.csv`, `quarterly.csv`, `quality.csv`.
+4. Загрузить CSV в дашборд и обновить `url` и `updated` у источников `projects`, `history`, `quarterly`, `quality`.
+
+Лист «Свод» не используется: итоги считаются суммированием по проектам. Справки (Word, Excel, PDF, HTML, CSV) формируются в самом дашборде, раздел «Портфель».
