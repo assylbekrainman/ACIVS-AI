@@ -156,6 +156,60 @@ def read_perechen(path, report_date):
         sheets.append({'title': ws.title, 'year': year.group(0) if year else '', 'declared': int(m.group(1)) if m else None})
     return out, dup, bad, sheets
 
+ORG_FORMS = r'\b(тоо|нао|ао|рго|ргп|на пхв|гкп|ип|чу|ку|ооо|llp|ltd|жшс|частное учреждение|частная компания|некоммерческое акционерное общество|товарищество с ограниченной ответственностью|акционерное общество|республиканское государственное предприятие на праве хозяйственного ведения|республиканское государственное предприятие)\b'
+ORG_ALIAS = {'казниту': 'казахский национальный исследовательский технический университет имени к и сатпаева', 'казну': 'казахский национальный университет имени аль фараби'}
+
+def org_key(name):
+    """Ключ организации для группировки: без кавычек, организационно-правовой формы и регистра."""
+    s = name.lower().replace('ё', 'е')
+    s = re.sub(r'[«»"“”„\'`]', ' ', s)
+    s = re.sub(ORG_FORMS, ' ', s)
+    s = re.sub(r'[^\w ]', ' ', s)
+    s = re.sub(r'\bим\b', 'имени', s).replace('ауэзов', 'ауезов')
+    s = re.sub(r'\s+', ' ', s).strip()
+    for a, full in ORG_ALIAS.items():
+        if s.startswith(a + ' ') or s == a: s = full
+    return s
+
+def valid_bin(b):
+    return bool(re.fullmatch(r'\d{12}', b or '')) and 1 <= int(b[2:4]) <= 12 and not re.fullmatch(r'0+[1-9]0+', b)
+
+def assign_orgs(projects, field, use_bin):
+    """Группирует проекты по организации: одинаковый ключ названия или (для грантополучателя) одинаковый БИН."""
+    from collections import Counter
+    parent = {}
+    def find(x):
+        while parent.setdefault(x, x) != x: parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+    def union(a, b): parent[find(a)] = find(b)
+    def similar(a, b):   # варианты написания одной организации
+        ca, cb = a.replace(' ', '').replace('i', 'і'), b.replace(' ', '').replace('i', 'і')
+        return ca[:8] == cb[:8] or a.split()[-1] == b.split()[-1] or ca in cb or cb in ca
+    by_bin = {}
+    for p in projects:
+        k = org_key(p[field]) if p[field] else ''
+        if not k: continue
+        union('n:' + k, 'n:' + k)
+        if use_bin and valid_bin(p.get('bin', '')): by_bin.setdefault(p['bin'], set()).add(k)
+    conflicts = []
+    for b, ks in by_bin.items():
+        ks = sorted(ks)
+        for a in ks:
+            for c in ks:
+                if a < c:
+                    if similar(a, c): union('n:' + a, 'n:' + c)
+                    else: conflicts.append((b, a, c))
+    labels = {}
+    for p in projects:
+        k = org_key(p[field]) if p[field] else ''
+        if not k: p[field + '_id'] = ''; continue
+        root = find('n:' + k); p[field + '_id'] = root; labels.setdefault(root, Counter())[re.sub(r'\s+', ' ', p[field]).strip()] += 1
+    ids = {r: f'{field[0].upper()}{i + 1:04d}' for i, r in enumerate(sorted(labels))}
+    for p in projects:
+        r = p[field + '_id']
+        p[field + '_id'] = ids.get(r, ''); p[field + '_org'] = labels[r].most_common(1)[0][0] if r else ''
+    return conflicts
+
 def main(snapdir, attrs_xlsx, perechen_xlsx, outdir):
     files = sorted(glob.glob(f'{snapdir}/????-??-??.xlsx')); dates = [os.path.basename(f)[:10] for f in files]
     snaps, sheets, dups, errs = {}, {}, {}, {}
@@ -184,6 +238,7 @@ def main(snapdir, attrs_xlsx, perechen_xlsx, outdir):
         for d in dates:
             if k in snaps[d]:
                 h = {'irn': rec['irn'], 'date': d}; h.update({m: snaps[d][k].get(m, '') for m in METRICS}); hist.append(h)
+    assign_orgs(projects, 'applicant', False); bin_conf = assign_orgs(projects, 'grantee', True)
     quarterly = []
     for d in dates:
         q = {'date': d, 'n_projects': len(snaps[d])}
@@ -238,12 +293,13 @@ def main(snapdir, attrs_xlsx, perechen_xlsx, outdir):
     if nc: add('Средняя', 'Перечень: у незакрытых проектов нет номера и даты договора', len(nc), 'Внести реквизиты договора.')
     nf = [p for p in projects if p['in_list'] == 'да' and p['report'] == 'Нет в файлах показателей' and p['status'] != 'Закрыт/прекращён']
     if nf: add('Средняя', 'Незакрытые проекты из перечня отсутствуют во всех файлах показателей', len(nf), 'Включить проекты в квартальную отчётность.')
+    if bin_conf: add('Средняя', 'Перечень: один БИН указан у разных грантополучателей (вероятно, в графе БИН указан БИН заявителя): ' + '; '.join(f'{b} — {a} / {c}' for b, a, c in bin_conf[:6]), len(bin_conf), 'Проверить БИН грантополучателя; такие проекты на панели не объединены.')
     nn = sum(1 for p in projects if p['quality'] == 'Нет показателей')
     if nn: add('Средняя', 'Нет ни одного финансового показателя', nn, 'Запросить отчётность у проектных менеджеров.')
     def w(path, fields, rows):
         with open(path, 'w', newline='', encoding='utf-8') as fh:
             wr = csv.DictWriter(fh, fields, extrasaction='ignore'); wr.writeheader(); wr.writerows(rows)
-    w(f'{outdir}/projects.csv', ['irn', 'year', 'name', 'grantee', 'applicant', 'bin', 'direction', 'manager', 'industry', 'region', 'place', 'partner', 'model', 'period', 'contract', 'end_date', 'status', 'closure', 'report', 'last_date', 'in_attrs', 'in_list', 'n_snap', 'grant', 'grant_2026', 'cofin_2026', 'paid'] + METRICS + ['author_fee', 'licenses', 'salary', 'miss', 'quality'], projects)
+    w(f'{outdir}/projects.csv', ['irn', 'year', 'name', 'grantee', 'applicant', 'applicant_id', 'applicant_org', 'grantee_id', 'grantee_org', 'bin', 'direction', 'manager', 'industry', 'region', 'place', 'partner', 'model', 'period', 'contract', 'end_date', 'status', 'closure', 'report', 'last_date', 'in_attrs', 'in_list', 'n_snap', 'grant', 'grant_2026', 'cofin_2026', 'paid'] + METRICS + ['author_fee', 'licenses', 'salary', 'miss', 'quality'], projects)
     w(f'{outdir}/history.csv', ['irn', 'date'] + METRICS, hist)
     w(f'{outdir}/quarterly.csv', ['date', 'n_projects'] + METRICS, quarterly)
     w(f'{outdir}/quality.csv', ['severity', 'finding', 'count', 'recommendation'], F)
