@@ -40,6 +40,7 @@ def num(v, errs=None):
         return ''
 def pdate(t):
     m = DATE_RE.search(t or ''); return datetime.date(int(m[3]), int(m[2]), int(m[1])).isoformat() if m else ''
+def mln(v): return f'{v/1e6:,.1f}'.replace(',', ' ').replace('.', ',')
 def dmy(d): return f'{d[8:]}.{d[5:7]}.{d[:4]}'
 
 def read_snapshot(path, errs):
@@ -208,6 +209,16 @@ def main(snapdir, attrs_xlsx, perechen_xlsx, outdir):
                 if v != '' and prev not in (None, '') and v < prev - 1: dec.append((k, prev - v))
                 prev = v if v != '' else prev
     decn = len({k for k, _ in dec})
+    # резкий рост: прирост за квартал больше 1 млрд ₸ и больше чем в 20 раз выше прежнего накопленного итога
+    jump = []
+    for k in keys:
+        prev = None
+        for d in dates:
+            if k in snaps[d]:
+                v = snaps[d][k].get('sales', '')
+                if v != '' and prev not in (None, '') and v - prev > 1e9 and v > 20 * max(prev, 1): jump.append((snaps[d][k]['irn'], d, prev, v))
+                prev = v if v != '' else prev
+    if jump: add('Высокая', 'Подозрительный скачок накопленных продаж за квартал (возможна ошибка ввода): ' + '; '.join(f'{i} на {dmy(d)}: {mln(p)} → {mln(v)} млн ₸' for i, d, p, v in jump), len(jump), 'Проверить первичные документы; при ошибке исправить в файле показателей. До проверки значение входит в итоги панели.')
     if decn: add('Средняя', f'Накопленные продажи уменьшились между отчётными датами (сумма снижений {sum(x for _, x in dec)/1e6:,.0f} млн ₸)'.replace(',', ' '), decn, 'Проверить корректировки; накопленные продажи не должны убывать.')
     no_attr = [p for p in projects if p['in_attrs'] == 'нет']
     if no_attr: add('Средняя', 'Нет отрасли и типа организации: файл с описательными данными на Drive охватывает только конкурсы 2022–2026', len(no_attr), 'Разместить на Drive реестр проектов 2016–2021 или добавить атрибуты в файлы показателей.')
