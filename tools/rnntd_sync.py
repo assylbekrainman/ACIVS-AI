@@ -2,7 +2,7 @@
 """Сведение квартальных файлов «Показатели проектов на ДД.ММ.ГГГГ» (Google Drive) в CSV для дашборда РННТД.
 Источник — только Google Drive. Лист «Свод» не используется: итоги считаются по проектам.
 
-    python3 tools/rnntd_sync.py <папка_со_снимками> <проекты_2022-2026.xlsx> <папка_вывода>
+    python3 tools/rnntd_sync.py <папка_со_снимками> <проекты_2022-2026.xlsx> <перечень_проектов.xlsx> <папка_вывода>
 
 В папке со снимками лежат файлы с именами ГГГГ-ММ-ДД.xlsx (по одному на отчётную дату).
 Результат:
@@ -10,6 +10,8 @@
   history.csv    — показатели проекта на каждую отчётную дату
   quarterly.csv  — итоги портфеля по датам (сумма по проектам)
   quality.csv    — замечания по качеству данных
+Перечень проектов 2022–2026 (с датами завершения) даёт договор, дату завершения, регион, место реализации,
+частного партнёра, ДКТ, менеджера и решения ННС о закрытии; по нему определяется статус проекта.
 Колонки находятся по заголовкам, поэтому новые кварталы работают без правок.
 """
 import sys, os, re, csv, json, datetime, glob
@@ -109,26 +111,78 @@ def read_attrs(path):
         out[key(irn)] = {'industry': industry_of(r[10]), 'region': region_of(r[4], r[5]), 'model': model_of(r[6]), 'period': norm(r[8]), 'applicant': norm(r[3])}
     return out
 
-def main(snapdir, attrs_xlsx, outdir):
+CLOSE_RE = re.compile(r'отказ|закрыт|прекращ|неисполн|расторг|пр?о?токол|выписк|непредостав|не заключ|возврат', re.I)
+SKIP_RE = re.compile(r'Заявитель|Грантополучатель|Частный|Софинансирующая|Наименование проекта|Адрес|Место реализации|Менеджер|ДКТ|БИН|эскроу|банка', re.I)
+
+def read_perechen(path, report_date):
+    """Перечень проектов по конкурсам: статус выводится из решений ННС и даты завершения."""
+    wb = openpyxl.load_workbook(path, data_only=True); out, dup, bad, sheets = {}, [], [], []
+    for ws in wb:
+        rows = list(ws.iter_rows(values_only=True))
+        hi = next((i for i, r in enumerate(rows) if r and any('ИРН' in str(c) for c in r if c)), None)
+        if hi is None: continue
+        head = [norm(c) for c in rows[hi]]
+        p = lambda rx: next((i for i, h in enumerate(head) if re.search(rx, h)), None)
+        c = {'contract': p(r'договор'), 'end': p(r'^Дата завершения'), 'region': p(r'^Регион|^Область/Город'), 'place': p(r'^Место реализации'),
+             'partner': p(r'^Частный партнер|^Софинансирующая'), 'bin': p(r'^БИН'), 'name': p(r'^Наименование проекта'), 'grantee': p(r'^Грантополучатель'),
+             'applicant': p(r'^Заявитель'), 'grant': p(r'^Одобренная сумма гранта'), 'grant_2026': p(r'^Сумма гранта на 2026'),
+             'cofin_2026': p(r'^Сумма софинансирования'), 'manager': p(r'^Менеджер'), 'dkt': p(r'^ДКТ')}
+        m = re.search(r'в\s*реал\.?\s*(\d+)', ws.title); year = re.search(r'20\d\d', ws.title)
+        g = lambda r, i: r[i] if i is not None and i < len(r) else None
+        cnt = 0
+        for r in rows[hi + 1:]:
+            irn = norm(r[1])
+            if not IRN_RE.match(irn): continue
+            notes = [norm(x) for i, x in enumerate(r) if x and i > 1 and i < len(head) and not SKIP_RE.search(head[i]) and CLOSE_RE.search(str(x))]
+            notes += [norm(x) for i, x in enumerate(r) if x and i >= len(head) and CLOSE_RE.search(str(x))]
+            end = g(r, c['end'])
+            if notes: st = 'Закрыт/прекращён'
+            elif isinstance(end, datetime.datetime): st = 'Завершён' if end.date().isoformat() <= report_date else 'В реализации'
+            else:
+                st = 'Не определён'; bad.append(f'{irn}: «{norm(end) or "пусто"}»')
+            con = norm(g(r, c['contract']))
+            b = g(r, c['bin']); b = (str(int(b)) if isinstance(b, float) else norm(b)).zfill(12) if b not in (None, '', '-') and re.match(r'^\d+(\.0)?$', str(b).strip()) else ''
+            dk = norm(g(r, c['dkt'])); dk = re.sub(r'ДКТ\s*', 'ДКТ ', dk) if dk.startswith('ДКТ') else ''
+            rec = {'irn': irn, 'p_year': year.group(0) if year else '', 'status': st, 'closure': '; '.join(dict.fromkeys(notes))[:300],
+                   'contract': '' if 'не заключ' in con.lower() else con, 'end_date': end.date().isoformat() if isinstance(end, datetime.datetime) else '',
+                   'p_region': region_of(g(r, c['region']), ''), 'place': norm(g(r, c['place'])), 'partner': norm(g(r, c['partner'])), 'bin': b,
+                   'p_name': norm(g(r, c['name'])), 'p_grantee': norm(g(r, c['grantee'])), 'p_applicant': norm(g(r, c['applicant'])),
+                   'p_grant': num(g(r, c['grant'])), 'grant_2026': num(g(r, c['grant_2026'])), 'cofin_2026': num(g(r, c['cofin_2026'])),
+                   'manager': norm(g(r, c['manager'])), 'p_dkt': dk}
+            if rec['manager'].startswith('ДКТ'): rec['manager'] = ''   # сдвиг колонок в строках закрытых проектов
+            if key(irn) in out: dup.append(irn)
+            out[key(irn)] = rec; cnt += 1
+        sheets.append({'title': ws.title, 'year': year.group(0) if year else '', 'declared': int(m.group(1)) if m else None})
+    return out, dup, bad, sheets
+
+def main(snapdir, attrs_xlsx, perechen_xlsx, outdir):
     files = sorted(glob.glob(f'{snapdir}/????-??-??.xlsx')); dates = [os.path.basename(f)[:10] for f in files]
     snaps, sheets, dups, errs = {}, {}, {}, {}
     for f, d in zip(files, dates):
         e = []; snaps[d], sheets[d], dups[d] = read_snapshot(f, e); errs[d] = e
     latest = dates[-1]; attrs = read_attrs(attrs_xlsx)
-    keys = sorted({k for d in dates for k in snaps[d]} | set())
+    per, per_dup, per_bad, per_sheets = read_perechen(perechen_xlsx, latest)
+    keys = sorted({k for d in dates for k in snaps[d]} | set(per))
     projects, hist, F = [], [], []
     for k in keys:
-        last = next(d for d in reversed(dates) if k in snaps[d]); s = snaps[last][k]; a = attrs.get(k, {})
-        rec = {'irn': s['irn'], 'year': s['sheet'], 'name': s['name'], 'grantee': s['grantee'], 'direction': s['direction'], 'industry': a.get('industry', ''), 'region': a.get('region', ''), 'model': a.get('model', ''),
-               'period': a.get('period', ''), 'status': 'В отчётности' if last == latest else 'Вне отчётности', 'last_date': last, 'in_attrs': 'да' if a else 'нет', 'n_snap': sum(1 for d in dates if k in snaps[d])}
-        for f_ in ['grant', 'paid'] + METRICS + ['author_fee', 'licenses', 'salary']: rec[f_] = s.get(f_, '')
-        if not rec['name'] and a.get('applicant'): rec['grantee'] = rec['grantee'] or a['applicant']
+        a = attrs.get(k, {}); pr = per.get(k, {})
+        last = next((d for d in reversed(dates) if k in snaps[d]), None); s_ = snaps[last][k] if last else {}
+        rec = {'irn': s_.get('irn') or next(iter([x for x in [pr.get('irn')] if x]), '') or k, 'year': s_.get('sheet') or pr.get('p_year', ''),
+               'name': s_.get('name') or pr.get('p_name', ''), 'grantee': s_.get('grantee') or pr.get('p_grantee', ''),
+               'direction': pr.get('p_dkt') or s_.get('direction', ''), 'industry': a.get('industry', ''), 'region': pr.get('p_region') or a.get('region', ''),
+               'model': a.get('model', ''), 'period': a.get('period', ''), 'status': pr.get('status', 'Нет данных'),
+               'report': ('В отчётности' if last == latest else 'Вне отчётности') if last else 'Нет в файлах показателей',
+               'last_date': last or '', 'in_attrs': 'да' if a else 'нет', 'in_list': 'да' if pr else 'нет', 'n_snap': sum(1 for d in dates if k in snaps[d])}
+        for f_ in ['contract', 'end_date', 'place', 'partner', 'bin', 'manager', 'closure', 'grant_2026', 'cofin_2026']: rec[f_] = pr.get(f_, '')
+        rec['applicant'] = pr.get('p_applicant') or a.get('applicant', '')
+        for f_ in ['grant', 'paid'] + METRICS + ['author_fee', 'licenses', 'salary']: rec[f_] = s_.get(f_, '')
+        if rec['grant'] == '' and pr.get('p_grant', '') != '': rec['grant'] = pr['p_grant']
         miss = [lab for f_, lab in ESSENTIAL.items() if rec[f_] in ('', None)]
         rec['miss'] = '; '.join(miss); rec['quality'] = 'Нет показателей' if all(rec[m] == '' for m in METRICS) else ('Полные' if not miss else 'Частичные')
         projects.append(rec)
         for d in dates:
             if k in snaps[d]:
-                h = {'irn': s['irn'], 'date': d}; h.update({m: snaps[d][k].get(m, '') for m in METRICS}); hist.append(h)
+                h = {'irn': rec['irn'], 'date': d}; h.update({m: snaps[d][k].get(m, '') for m in METRICS}); hist.append(h)
     quarterly = []
     for d in dates:
         q = {'date': d, 'n_projects': len(snaps[d])}
@@ -138,7 +192,7 @@ def main(snapdir, attrs_xlsx, outdir):
     def add(sev, finding, count, rec): F.append({'severity': sev, 'finding': finding, 'count': count, 'recommendation': rec})
     old = {sh: dt for sh, dt in sheets[latest].items() if dt and dt < latest}
     if old: add('Средняя', 'Листы последнего файла с устаревшей отчётной датой: ' + ', '.join(f'{s} — на {dmy(dt)}' for s, dt in sorted(old.items())), sum(1 for v in snaps[latest].values() if v['sheet'] in old), 'Обновить листы до отчётной даты файла.')
-    drop = [p for p in projects if p['status'] == 'Вне отчётности']
+    drop = [p for p in projects if p['report'] == 'Вне отчётности']
     if drop: add('Средняя', f'Проекты были в прежних файлах, но отсутствуют в последнем ({dmy(latest)}); их показатели взяты на последнюю дату наличия', len(drop), 'Подтвердить причину (завершение, закрытие, пропуск) и зафиксировать итоговые показатели.')
     for d, e in errs.items():
         if e and d == latest: add('Высокая', f'В файле на {dmy(d)} есть ячейки с ошибками формул: {", ".join(sorted(set(e)))}', len(e), 'Исправить формулы; такие ячейки на дашборде считаются пустыми.')
@@ -156,20 +210,33 @@ def main(snapdir, attrs_xlsx, outdir):
     decn = len({k for k, _ in dec})
     if decn: add('Средняя', f'Накопленные продажи уменьшились между отчётными датами (сумма снижений {sum(x for _, x in dec)/1e6:,.0f} млн ₸)'.replace(',', ' '), decn, 'Проверить корректировки; накопленные продажи не должны убывать.')
     no_attr = [p for p in projects if p['in_attrs'] == 'нет']
-    if no_attr: add('Средняя', 'Для проектов нет описательных данных (отрасль, регион, тип организации): файл с атрибутами на Drive охватывает только конкурсы 2022–2026', len(no_attr), 'Разместить на Drive реестр проектов 2016–2021 или добавить атрибуты в файлы показателей.')
+    if no_attr: add('Средняя', 'Нет отрасли и типа организации: файл с описательными данными на Drive охватывает только конкурсы 2022–2026', len(no_attr), 'Разместить на Drive реестр проектов 2016–2021 или добавить атрибуты в файлы показателей.')
     for f_, lab in [('industry', 'отрасль'), ('region', 'регион'), ('model', 'тип организации'), ('grant', 'сумма гранта')]:
         n = sum(1 for p in projects if p[f_] in ('', None))
         if n: add('Низкая', f'Не заполнено поле «{lab}»', n, 'Дозаполнить.')
+    for sh in per_sheets:
+        if sh['declared'] is None: continue
+        act = sum(1 for v in per.values() if v['p_year'] == sh['year'] and v['status'] != 'Закрыт/прекращён')
+        if act != sh['declared']:
+            add('Средняя', f"Перечень, лист «{sh['title']}»: в названии указано «в реал. {sh['declared']}», по строкам незакрытых проектов — {act}", abs(act - sh['declared']), 'Сверить статусы строк с названием листа.')
+    if per_bad: add('Средняя', 'Перечень: дата завершения не распознана (статус «Не определён»): ' + '; '.join(per_bad[:8]), len(per_bad), 'Указать дату в формате ДД.ММ.ГГГГ или отметить решение ННС.')
+    if per_dup: add('Высокая', 'Перечень: ИРН повторяется: ' + ', '.join(sorted(set(per_dup))), len(per_dup), 'Оставить одну строку на проект.')
+    cl_rep = [p for p in projects if p['status'] == 'Закрыт/прекращён' and p['report'] == 'В отчётности']
+    if cl_rep: add('Высокая', 'Проекты закрыты/прекращены по перечню, но остаются в последнем файле показателей: ' + ', '.join(p['irn'] for p in cl_rep[:10]), len(cl_rep), 'Подтвердить статус; исключить из отчётности или зафиксировать итоговые показатели.')
+    nc = [p for p in projects if p['in_list'] == 'да' and not p['contract'] and p['status'] != 'Закрыт/прекращён']
+    if nc: add('Средняя', 'Перечень: у незакрытых проектов нет номера и даты договора', len(nc), 'Внести реквизиты договора.')
+    nf = [p for p in projects if p['in_list'] == 'да' and p['report'] == 'Нет в файлах показателей' and p['status'] != 'Закрыт/прекращён']
+    if nf: add('Средняя', 'Незакрытые проекты из перечня отсутствуют во всех файлах показателей', len(nf), 'Включить проекты в квартальную отчётность.')
     nn = sum(1 for p in projects if p['quality'] == 'Нет показателей')
     if nn: add('Средняя', 'Нет ни одного финансового показателя', nn, 'Запросить отчётность у проектных менеджеров.')
     def w(path, fields, rows):
         with open(path, 'w', newline='', encoding='utf-8') as fh:
             wr = csv.DictWriter(fh, fields, extrasaction='ignore'); wr.writeheader(); wr.writerows(rows)
-    w(f'{outdir}/projects.csv', ['irn', 'year', 'name', 'grantee', 'direction', 'industry', 'region', 'model', 'period', 'status', 'last_date', 'in_attrs', 'n_snap', 'grant', 'paid'] + METRICS + ['author_fee', 'licenses', 'salary', 'miss', 'quality'], projects)
+    w(f'{outdir}/projects.csv', ['irn', 'year', 'name', 'grantee', 'applicant', 'bin', 'direction', 'manager', 'industry', 'region', 'place', 'partner', 'model', 'period', 'contract', 'end_date', 'status', 'closure', 'report', 'last_date', 'in_attrs', 'in_list', 'n_snap', 'grant', 'grant_2026', 'cofin_2026', 'paid'] + METRICS + ['author_fee', 'licenses', 'salary', 'miss', 'quality'], projects)
     w(f'{outdir}/history.csv', ['irn', 'date'] + METRICS, hist)
     w(f'{outdir}/quarterly.csv', ['date', 'n_projects'] + METRICS, quarterly)
     w(f'{outdir}/quality.csv', ['severity', 'finding', 'count', 'recommendation'], F)
     from collections import Counter
-    print(json.dumps({'snapshots': dates, 'projects': len(projects), 'quality': Counter(p['quality'] for p in projects), 'status': Counter(p['status'] for p in projects), 'findings': len(F)}, ensure_ascii=False, default=dict))
+    print(json.dumps({'snapshots': dates, 'projects': len(projects), 'quality': Counter(p['quality'] for p in projects), 'status': Counter(p['status'] for p in projects), 'report': Counter(p['report'] for p in projects), 'findings': len(F)}, ensure_ascii=False, default=dict))
 
-if __name__ == '__main__': main(*sys.argv[1:4])
+if __name__ == '__main__': main(*sys.argv[1:5])
