@@ -151,6 +151,17 @@ def read_perechen(path, report_date):
                    'p_grant': num(g(r, c['grant'])), 'grant_2026': num(g(r, c['grant_2026'])), 'cofin_2026': num(g(r, c['cofin_2026'])),
                    'manager': norm(g(r, c['manager'])), 'p_dkt': dk}
             if rec['manager'].startswith('ДКТ'): rec['manager'] = ''   # сдвиг колонок в строках закрытых проектов
+            if not rec['p_name'] or CLOSE_RE.search(rec['p_name']):
+                # строка закрытого проекта сдвинута влево: название — самая длинная ячейка, не похожая на организацию или договор
+                ORG = re.compile(r'^(ТОО|НАО|АО|РГП|РГКП|ЧУ|ИП|ДТОО|Дочернее|Товарищество|Некоммерческое|Акционерное|Филиал|Частн|Республиканск|Общественн|ОО|«|")', re.I)
+                cells = [(i, norm(r[i])) for i in range(2, min(len(r), 11)) if isinstance(r[i], str)]
+                cand = [(i, t) for i, t in cells if len(t) > 25 and not ORG.match(t) and not CLOSE_RE.search(t) and not re.match(r'^№?\s*\d+\s*от', t)]
+                if cand:
+                    ni, rec['p_name'] = max(cand, key=lambda x: len(x[1]))
+                    orgs = [t for i, t in cells if i < ni and i > 2 and ORG.match(t)]
+                    if orgs: rec['p_grantee'] = orgs[-1]
+                    nums = [num(r[i]) for i in range(ni + 1, min(len(r), ni + 4)) if num(r[i]) != '' and num(r[i]) > 1e6]
+                    if nums: rec['p_grant'] = nums[0]
             if key(irn) in out: dup.append(irn)
             out[key(irn)] = rec; cnt += 1
         sheets.append({'title': ws.title, 'year': year.group(0) if year else '', 'declared': int(m.group(1)) if m else None})
@@ -238,6 +249,15 @@ def main(snapdir, attrs_xlsx, perechen_xlsx, outdir):
         for d in dates:
             if k in snaps[d]:
                 h = {'irn': rec['irn'], 'date': d}; h.update({m: snaps[d][k].get(m, '') for m in METRICS}); hist.append(h)
+    # отрасль по названию проекта (ручная классификация) — только где в источниках отрасли нет
+    byname = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'rnntd_industry_by_name.csv')
+    cls = {key(r['irn']): r['industry'] for r in csv.DictReader(open(byname, encoding='utf-8'))} if os.path.exists(byname) else {}
+    for p in projects:
+        if p['industry']: p['industry_src'] = 'источник'
+        elif key(p['irn']) in cls: p['industry'], p['industry_src'] = cls[key(p['irn'])], 'по названию проекта'
+        else: p['industry_src'] = ''
+        miss = [lab for f_, lab in ESSENTIAL.items() if p[f_] in ('', None)]
+        p['miss'] = '; '.join(miss); p['quality'] = 'Нет показателей' if all(p[m] == '' for m in METRICS) else ('Полные' if not miss else 'Частичные')
     assign_orgs(projects, 'applicant', False); bin_conf = assign_orgs(projects, 'grantee', True)
     quarterly = []
     for d in dates:
@@ -276,7 +296,7 @@ def main(snapdir, attrs_xlsx, perechen_xlsx, outdir):
     if jump: add('Высокая', 'Подозрительный скачок накопленных продаж за квартал (возможна ошибка ввода): ' + '; '.join(f'{i} на {dmy(d)}: {mln(p)} → {mln(v)} млн ₸' for i, d, p, v in jump), len(jump), 'Проверить первичные документы; при ошибке исправить в файле показателей. До проверки значение входит в итоги панели.')
     if decn: add('Средняя', f'Накопленные продажи уменьшились между отчётными датами (сумма снижений {sum(x for _, x in dec)/1e6:,.0f} млн ₸)'.replace(',', ' '), decn, 'Проверить корректировки; накопленные продажи не должны убывать.')
     no_attr = [p for p in projects if p['in_attrs'] == 'нет']
-    if no_attr: add('Средняя', 'Нет отрасли и типа организации: файл с описательными данными на Drive охватывает только конкурсы 2022–2026', len(no_attr), 'Разместить на Drive реестр проектов 2016–2021 или добавить атрибуты в файлы показателей.')
+    if no_attr: add('Средняя', 'Нет описательных данных (тип организации; отрасль в источнике): файл «Проекты 2022–2026 г. данные» охватывает только конкурсы 2022–2026', len(no_attr), 'Разместить на Drive реестр проектов 2016–2021 или добавить атрибуты в файлы показателей.')
     for f_, lab in [('industry', 'отрасль'), ('region', 'регион'), ('model', 'тип организации'), ('grant', 'сумма гранта')]:
         n = sum(1 for p in projects if p[f_] in ('', None))
         if n: add('Низкая', f'Не заполнено поле «{lab}»', n, 'Дозаполнить.')
@@ -294,12 +314,14 @@ def main(snapdir, attrs_xlsx, perechen_xlsx, outdir):
     nf = [p for p in projects if p['in_list'] == 'да' and p['report'] == 'Нет в файлах показателей' and p['status'] != 'Закрыт/прекращён']
     if nf: add('Средняя', 'Незакрытые проекты из перечня отсутствуют во всех файлах показателей', len(nf), 'Включить проекты в квартальную отчётность.')
     if bin_conf: add('Средняя', 'Перечень: один БИН указан у разных грантополучателей (вероятно, в графе БИН указан БИН заявителя): ' + '; '.join(f'{b} — {a} / {c}' for b, a, c in bin_conf[:6]), len(bin_conf), 'Проверить БИН грантополучателя; такие проекты на панели не объединены.')
+    nbn = sum(1 for p in projects if p.get('industry_src') == 'по названию проекта')
+    if nbn: add('Низкая', 'Отрасль не указана в источниках Drive и определена по названию проекта (tools/rnntd_industry_by_name.csv)', nbn, 'Внести отрасль в файлы Drive; классификацию по названию проверить проектным менеджерам.')
     nn = sum(1 for p in projects if p['quality'] == 'Нет показателей')
     if nn: add('Средняя', 'Нет ни одного финансового показателя', nn, 'Запросить отчётность у проектных менеджеров.')
     def w(path, fields, rows):
         with open(path, 'w', newline='', encoding='utf-8') as fh:
             wr = csv.DictWriter(fh, fields, extrasaction='ignore'); wr.writeheader(); wr.writerows(rows)
-    w(f'{outdir}/projects.csv', ['irn', 'year', 'name', 'grantee', 'applicant', 'applicant_id', 'applicant_org', 'grantee_id', 'grantee_org', 'bin', 'direction', 'manager', 'industry', 'region', 'place', 'partner', 'model', 'period', 'contract', 'end_date', 'status', 'closure', 'report', 'last_date', 'in_attrs', 'in_list', 'n_snap', 'grant', 'grant_2026', 'cofin_2026', 'paid'] + METRICS + ['author_fee', 'licenses', 'salary', 'miss', 'quality'], projects)
+    w(f'{outdir}/projects.csv', ['irn', 'year', 'name', 'grantee', 'applicant', 'applicant_id', 'applicant_org', 'grantee_id', 'grantee_org', 'bin', 'direction', 'manager', 'industry', 'industry_src', 'region', 'place', 'partner', 'model', 'period', 'contract', 'end_date', 'status', 'closure', 'report', 'last_date', 'in_attrs', 'in_list', 'n_snap', 'grant', 'grant_2026', 'cofin_2026', 'paid'] + METRICS + ['author_fee', 'licenses', 'salary', 'miss', 'quality'], projects)
     w(f'{outdir}/history.csv', ['irn', 'date'] + METRICS, hist)
     w(f'{outdir}/quarterly.csv', ['date', 'n_projects'] + METRICS, quarterly)
     w(f'{outdir}/quality.csv', ['severity', 'finding', 'count', 'recommendation'], F)
