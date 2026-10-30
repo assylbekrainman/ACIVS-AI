@@ -16,6 +16,7 @@
 """
 import sys, os, re, csv, json, datetime, glob
 import openpyxl
+from collections import Counter
 
 IRN_RE = re.compile(r'^(?:\d{3,4}-\d{2}-ГК|[A-ZА-Я]{2}\d{6,})$')
 DATE_RE = re.compile(r'(\d{2})\.(\d{2})\.(\d{4})')
@@ -95,14 +96,34 @@ def industry_of(t):
         if k in l: return v
     return ''
 
+MODEL_TYPES = ['ВУЗ', 'НИИ', 'НПЦ', 'Бизнес-организация', 'Государственная организация', 'Общественное объединение', 'Физическое лицо']
+
 def model_of(t):
+    """Нормализует значение поля «Тип организации» к единым категориям; пусто — если значение не распознано."""
     l = norm(t).lower()
-    if l in ('', 'none', '0.0', '3.0', '0', '-'): return ''
-    if 'вуз' in l: return 'ВУЗ'
-    if l in ('нпц',): return 'НПЦ'
+    if l in ('', 'none', '0.0', '3.0', '0', '-', 'договор не заключен'): return ''
+    if 'вуз' in l or 'университет' in l or 'учебн' in l: return 'ВУЗ'
     if 'нии' in l: return 'НИИ'
+    if l in ('нпц', 'нкц', 'нпо'): return 'НПЦ'
     if 'физ' in l: return 'Физическое лицо'
-    return 'Бизнес-организация' if any(x in l for x in ('тоо', 'ао', 'нао', 'бизнес', 'нпп', 'ип', 'стартап')) else t
+    if 'общественн' in l: return 'Общественное объединение'
+    if 'государствен' in l or l in ('учреждение', 'частное учреждение'): return 'Государственная организация' if 'государствен' in l else 'НПЦ'
+    if any(x in l for x in ('тоо', 'ао', 'нао', 'бизнес', 'нпп', 'ип', 'стартап', 'start', 'частного партнера')): return 'Бизнес-организация'
+    return ''
+
+def model_by_name(name):
+    """Тип организации по её названию (для проектов без поля «Тип организации»)."""
+    l = norm(name).lower()
+    if not l or l in ('-',): return ''
+    if re.search(r'общественн', l): return 'Общественное объединение'
+    if re.search(r'университет|university|академи|высш(ая|ей) школ|колледж|казниту|казну|satbayev', l): return 'ВУЗ'
+    if re.search(r'научно-исследовательск|\bнии\b|институт', l): return 'НИИ'
+    if re.search(r'научно-производствен|научно-технологическ|научно-техническ|научный центр|национальный центр|\bнпц\b|\bнпп\b|\bнптц\b|лаборатори|технопарк', l): return 'НПЦ'
+    if re.search(r'общественн|объединени', l): return 'Общественное объединение'
+    if re.search(r'\bрг[кп]п\b|\bгкп\b|государственн|учреждени|филиал рг', l): return 'Государственная организация'
+    if re.search(r'\b(тоо|ао|нао|ип|ооо|ltd|llp|кх|пк)\b|товарищество|акционерн|компани|корпораци|холдинг|фирма|завод|«|"', l): return 'Бизнес-организация'
+    if re.fullmatch(r'[а-яёәіңғүұқөһ\-]+( [а-яёәіңғүұқөһ\-]+){1,3}', l): return 'Физическое лицо'
+    return 'Бизнес-организация'
 
 def read_attrs(path):
     ws = openpyxl.load_workbook(path, data_only=True).active; out = {}
@@ -258,6 +279,11 @@ def main(snapdir, attrs_xlsx, perechen_xlsx, outdir):
         else: p['industry_src'] = ''
         miss = [lab for f_, lab in ESSENTIAL.items() if p[f_] in ('', None)]
         p['miss'] = '; '.join(miss); p['quality'] = 'Нет показателей' if all(p[m] == '' for m in METRICS) else ('Полные' if not miss else 'Частичные')
+    for p in projects:   # тип организации: из источника, иначе по названию заявителя, иначе грантополучателя
+        if p['model']: p['model_src'] = 'источник'
+        elif p['applicant'] and model_by_name(p['applicant']): p['model'], p['model_src'] = model_by_name(p['applicant']), 'по названию заявителя'
+        elif p['grantee'] and model_by_name(p['grantee']): p['model'], p['model_src'] = model_by_name(p['grantee']), 'по названию грантополучателя'
+        else: p['model_src'] = ''
     assign_orgs(projects, 'applicant', False); bin_conf = assign_orgs(projects, 'grantee', True)
     quarterly = []
     for d in dates:
@@ -316,16 +342,17 @@ def main(snapdir, attrs_xlsx, perechen_xlsx, outdir):
     if bin_conf: add('Средняя', 'Перечень: один БИН указан у разных грантополучателей (вероятно, в графе БИН указан БИН заявителя): ' + '; '.join(f'{b} — {a} / {c}' for b, a, c in bin_conf[:6]), len(bin_conf), 'Проверить БИН грантополучателя; такие проекты на панели не объединены.')
     nbn = sum(1 for p in projects if p.get('industry_src') == 'по названию проекта')
     if nbn: add('Низкая', 'Отрасль не указана в источниках Drive и определена по названию проекта (tools/rnntd_industry_by_name.csv)', nbn, 'Внести отрасль в файлы Drive; классификацию по названию проверить проектным менеджерам.')
+    nm = Counter(p['model_src'] for p in projects)
+    if nm.get('по названию заявителя') or nm.get('по названию грантополучателя'): add('Низкая', f"Тип организации не указан в источниках и определён по названию: заявителя — {nm.get('по названию заявителя', 0)}, грантополучателя — {nm.get('по названию грантополучателя', 0)} (конкурсы 2016–2018, где заявитель неизвестен)", nm.get('по названию заявителя', 0) + nm.get('по названию грантополучателя', 0), 'Указать тип организации в файлах Drive.')
     nn = sum(1 for p in projects if p['quality'] == 'Нет показателей')
     if nn: add('Средняя', 'Нет ни одного финансового показателя', nn, 'Запросить отчётность у проектных менеджеров.')
     def w(path, fields, rows):
         with open(path, 'w', newline='', encoding='utf-8') as fh:
             wr = csv.DictWriter(fh, fields, extrasaction='ignore'); wr.writeheader(); wr.writerows(rows)
-    w(f'{outdir}/projects.csv', ['irn', 'year', 'name', 'grantee', 'applicant', 'applicant_id', 'applicant_org', 'grantee_id', 'grantee_org', 'bin', 'direction', 'manager', 'industry', 'industry_src', 'region', 'place', 'partner', 'model', 'period', 'contract', 'end_date', 'status', 'closure', 'report', 'last_date', 'in_attrs', 'in_list', 'n_snap', 'grant', 'grant_2026', 'cofin_2026', 'paid'] + METRICS + ['author_fee', 'licenses', 'salary', 'miss', 'quality'], projects)
+    w(f'{outdir}/projects.csv', ['irn', 'year', 'name', 'grantee', 'applicant', 'applicant_id', 'applicant_org', 'grantee_id', 'grantee_org', 'bin', 'direction', 'manager', 'industry', 'industry_src', 'region', 'place', 'partner', 'model', 'model_src', 'period', 'contract', 'end_date', 'status', 'closure', 'report', 'last_date', 'in_attrs', 'in_list', 'n_snap', 'grant', 'grant_2026', 'cofin_2026', 'paid'] + METRICS + ['author_fee', 'licenses', 'salary', 'miss', 'quality'], projects)
     w(f'{outdir}/history.csv', ['irn', 'date'] + METRICS, hist)
     w(f'{outdir}/quarterly.csv', ['date', 'n_projects'] + METRICS, quarterly)
     w(f'{outdir}/quality.csv', ['severity', 'finding', 'count', 'recommendation'], F)
-    from collections import Counter
     print(json.dumps({'snapshots': dates, 'projects': len(projects), 'quality': Counter(p['quality'] for p in projects), 'status': Counter(p['status'] for p in projects), 'report': Counter(p['report'] for p in projects), 'findings': len(F)}, ensure_ascii=False, default=dict))
 
 if __name__ == '__main__': main(*sys.argv[1:5])
