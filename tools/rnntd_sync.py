@@ -181,8 +181,13 @@ def read_perechen(path, report_date):
                     ni, rec['p_name'] = max(cand, key=lambda x: len(x[1]))
                     orgs = [t for i, t in cells if i < ni and i > 2 and ORG.match(t)]
                     if orgs: rec['p_grantee'] = orgs[-1]
+                    con = [t for i, t in cells if re.match(r'^№?\s*\d+\s*от\s', t)]
+                    rec['contract'] = con[0] if con else ''
+                    rec['partner'] = ''   # в сдвинутой строке частного партнёра не определить
                     nums = [num(r[i]) for i in range(ni + 1, min(len(r), ni + 4)) if num(r[i]) != '' and num(r[i]) > 1e6]
                     if nums: rec['p_grant'] = nums[0]
+            if rec['place'].startswith('ДКТ'): rec['place'] = ''
+            if rec['bin'] and (not valid_bin(rec['bin']) or int(rec['bin']) == rec.get('p_grant')): rec['bin'] = ''   # в сдвинутых строках в графе БИН стоит сумма гранта
             if key(irn) in out: dup.append(irn)
             out[key(irn)] = rec; cnt += 1
         sheets.append({'title': ws.title, 'year': year.group(0) if year else '', 'declared': int(m.group(1)) if m else None})
